@@ -31,8 +31,8 @@ const mimeTypes = {
 function serveStaticFile(req, res) {
   let filePath = req.url === '/' ? '/index.html' : req.url;
   
-  // Remove query string
-  filePath = filePath.split('?')[0];
+  // Remove query string and hash
+  filePath = filePath.split('?')[0].split('#')[0];
   
   // Security: prevent directory traversal
   if (filePath.includes('..')) {
@@ -41,27 +41,53 @@ function serveStaticFile(req, res) {
     return;
   }
   
+  // Normalize path (remove leading slash for join)
+  const normalizedPath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+  
   // Try dist folder first (production), then root (development)
-  const distPath = join(process.cwd(), 'dist', filePath);
-  const rootPath = join(process.cwd(), filePath);
+  const distPath = join(process.cwd(), 'dist', normalizedPath);
+  const rootPath = join(process.cwd(), normalizedPath);
   
   let fullPath;
+  let found = false;
+  
+  // Check dist folder first (production build)
   if (existsSync(distPath)) {
-    fullPath = distPath;
-  } else if (existsSync(rootPath) && !filePath.startsWith('/server') && !filePath.startsWith('/src') && !filePath.startsWith('/node_modules')) {
-    fullPath = rootPath;
-  } else {
-    // SPA fallback - serve index.html for all routes
-    fullPath = join(process.cwd(), 'dist', 'index.html');
-    if (!existsSync(fullPath)) {
-      res.writeHead(404);
-      res.end('Not Found');
-      return;
+    const stat = statSync(distPath);
+    if (stat.isFile()) {
+      fullPath = distPath;
+      found = true;
     }
   }
   
-  if (!existsSync(fullPath)) {
-    res.writeHead(404);
+  // If not found in dist, check root (development)
+  if (!found && existsSync(rootPath)) {
+    const stat = statSync(rootPath);
+    if (stat.isFile() && !normalizedPath.startsWith('server') && !normalizedPath.startsWith('src') && !normalizedPath.startsWith('node_modules')) {
+      fullPath = rootPath;
+      found = true;
+    }
+  }
+  
+  // SPA fallback - serve index.html for all non-file routes
+  if (!found) {
+    const distIndexPath = join(process.cwd(), 'dist', 'index.html');
+    if (existsSync(distIndexPath)) {
+      fullPath = distIndexPath;
+      found = true;
+    } else {
+      // Last resort - try root index.html
+      const rootIndexPath = join(process.cwd(), 'index.html');
+      if (existsSync(rootIndexPath)) {
+        fullPath = rootIndexPath;
+        found = true;
+      }
+    }
+  }
+  
+  if (!found || !fullPath) {
+    console.error(`[Static] File not found: ${req.url} (tried: ${distPath}, ${rootPath})`);
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found');
     return;
   }
@@ -78,11 +104,23 @@ function serveStaticFile(req, res) {
     }
     
     const content = readFileSync(fullPath);
-    res.writeHead(200, { 'Content-Type': contentType });
+    
+    // Set appropriate headers
+    const headers = {
+      'Content-Type': contentType,
+      'Content-Length': content.length
+    };
+    
+    // Add cache headers for assets
+    if (filePath.startsWith('/assets/')) {
+      headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+    }
+    
+    res.writeHead(200, headers);
     res.end(content);
   } catch (error) {
-    console.error('Error serving file:', error);
-    res.writeHead(500);
+    console.error(`[Static] Error serving file ${fullPath}:`, error);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end('Internal Server Error');
   }
 }
@@ -1279,5 +1317,20 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`WebSocket server running on ws://localhost:${PORT}`);
+  
+  // Check if dist folder exists (for debugging)
+  const distPath = join(process.cwd(), 'dist');
+  const distIndexPath = join(distPath, 'index.html');
+  if (existsSync(distPath)) {
+    console.log(`[Static] Dist folder found at: ${distPath}`);
+    if (existsSync(distIndexPath)) {
+      console.log(`[Static] index.html found in dist folder`);
+    } else {
+      console.warn(`[Static] WARNING: index.html not found in dist folder!`);
+    }
+  } else {
+    console.warn(`[Static] WARNING: Dist folder not found at: ${distPath}`);
+    console.warn(`[Static] Server will try to serve from root directory`);
+  }
 });
 
